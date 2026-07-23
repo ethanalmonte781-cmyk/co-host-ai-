@@ -4,6 +4,7 @@ Central event queue for CoHost.AI
 
 import queue
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -11,7 +12,10 @@ logger = logging.getLogger(__name__)
 class EventManager:
 
     def __init__(self):
+
         self.events = queue.PriorityQueue()
+
+        self.counter = 0
 
         logger.info(
             "Event manager initialized"
@@ -25,6 +29,8 @@ class EventManager:
         data: dict
     ):
 
+        self.counter += 1
+
         event = {
             "type": event_type,
             "data": data
@@ -33,6 +39,7 @@ class EventManager:
         self.events.put(
             (
                 -priority,
+                self.counter,
                 event
             )
         )
@@ -45,9 +52,11 @@ class EventManager:
     def get_event(self):
 
         if self.events.empty():
+
             return None
 
-        return self.events.get()[1]
+
+        return self.events.get()[2]
 
 
     def has_events(self):

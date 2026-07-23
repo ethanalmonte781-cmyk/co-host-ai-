@@ -10,18 +10,25 @@ import time
 import logging
 
 from .VisionManager import VisionManager
+from .EventManager import EventManager
 
 logger = logging.getLogger(__name__)
 
 
 class VisionLoop:
 
-    def __init__(self, interval=15):
+    def __init__(
+        self,
+        interval=15,
+        event_manager=None
+    ):
 
         self.interval = interval
         self.running = False
 
         self.vision = VisionManager()
+
+        self.event_manager = event_manager
 
         self.latest_description = ""
 
@@ -55,13 +62,11 @@ class VisionLoop:
 
                 screenshot = self.vision.capture_screen()
 
-
                 if screenshot is None:
                     time.sleep(self.interval)
                     continue
 
 
-                # Only analyze changed screens
                 if not self.vision.has_screen_changed(
                     screenshot
                 ):
@@ -74,13 +79,11 @@ class VisionLoop:
                     continue
 
 
-
                 logger.info(
                     "Screen change detected"
                 )
 
 
-                # Save screenshot temporarily
                 temp_path = "screenshots/current_screen.png"
 
                 screenshot.save(
@@ -88,24 +91,33 @@ class VisionLoop:
                 )
 
 
-                # Analyze using AI vision model
                 description = self.analyze_image(
                     temp_path
                 )
 
 
-                if description:
+                self.latest_description = description
 
-                    self.latest_description = description
 
-                    self.vision.update_memory(
-                        description
+                if self.event_manager and description:
+
+                    self.event_manager.add_event(
+                        priority=3,
+                        event_type="vision",
+                        data={
+                            "description": description
+                        }
                     )
 
 
-                    logger.info(
-                        f"Screen updated: {description[:100]}"
-                    )
+                self.vision.update_memory(
+                    description
+                )
+
+
+                logger.info(
+                    f"Screen updated: {description[:100]}"
+                )
 
 
             except Exception as e:
@@ -118,7 +130,6 @@ class VisionLoop:
             time.sleep(
                 self.interval
             )
-
 
 
     def analyze_image(self, image_path):
@@ -143,14 +154,12 @@ class VisionLoop:
                 ).decode()
 
 
-
             response = chat(
                 model="llava",
                 messages=[
                     {
                         "role": "user",
-                        "content":
-                            """
+                        "content": """
 Analyze this screenshot.
 
 Describe:
@@ -179,11 +188,9 @@ Describe:
             return ""
 
 
-
     def get_context(self):
 
         return self.latest_description
-
 
 
     def stop(self):

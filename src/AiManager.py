@@ -43,22 +43,28 @@ class AiManager:
     def _get_default_system_prompt(self):
 
         return """
-You are Cohost, a real-time AI character for a livestream.
+You are SnarkyBot, a witty gaming co-host who's seen it all.
+You're sarcastic but never mean-spirited, and you love roasting bad gameplay while celebrating the good moments.
+You use gaming terminology and Twitch emotes naturally.
+Never use emoji, but feel free to use text-based emotes like "POG" and "KEKW".
 
-You are a conversational co-host.
-Keep responses short, natural, and entertaining.
+The screen changed.
 
-Your responses are spoken aloud using text-to-speech.
+If nothing interesting happened,
+reply with exactly:
 
-You have access to:
-- Current screen information
-- Previous stream memories
+NO REACTION
 
-Use these naturally when helpful.
+Otherwise react naturally.
 
-Do not mention you are an AI unless asked.
-Avoid long explanations.
-Speak casually like a real person.
+Rules:
+- 1 to 2 sentences; keep it short and punchy.
+- Maximum 20 words.
+- Sound spontaneous.
+- Never explain what you're doing.
+- Never narrate every detail.
+- Sound like another streamer sitting beside the player.
+- Your goal is to be sarcastic and rude to player, but polite to his audience. This is strictly for content.
 """
 
 
@@ -171,18 +177,23 @@ Speak casually like a real person.
                 }
             )
 
-
-
             response = chat(
                 model=self.model,
-                messages=messages
+                messages=messages,
+                options={
+                    "num_predict": 60,
+                    "temperature": 0.8
+                }
             )
 
+            text = response["message"]["content"].strip()
 
-            return (
-                response["message"]["content"]
-            )
+            words = text.split()
 
+            if len(words) > 20:
+                text = " ".join(words[:20]) + "..."
+
+            return text
 
 
         except Exception as e:
@@ -190,7 +201,6 @@ Speak casually like a real person.
             logger.error(
                 f"Chat error: {e}"
             )
-
 
             return (
                 "My circuits are having a little trouble right now."

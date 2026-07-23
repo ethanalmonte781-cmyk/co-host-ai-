@@ -19,11 +19,11 @@ import queue
 import logging
 import time
 from typing import Optional, List, Dict
-
+from .TikTokChatManager import TikTokChatManager
+from .ChatFilter import ChatFilter
 from rich.console import Console
-
+from .EventManager import EventManager
 from .ReactionManager import ReactionManager
-from .ObservationLoop import ObservationLoop
 from .ObservationLoop import ObservationLoop
 from .config import Config
 from .AiManager import AiManager
@@ -49,11 +49,10 @@ class VoiceAssistant:
         self.processed_questions = set()
 
         self.question_queue = queue.Queue()
-
+        self.event_manager = EventManager()
         self.udp_socket = None
-
         self.running = False
-
+        self.tiktok_manager = None
 
         self.cli = CLIInterface(
             show_detailed_logs=self.config.show_detailed_logs,
@@ -92,6 +91,14 @@ class VoiceAssistant:
             )
 
 
+            self.chat_filter = ChatFilter()
+
+            self.tiktok_manager = TikTokChatManager(
+                 username="akaFk_",
+                 event_manager=self.event_manager,
+                 chat_filter=self.chat_filter
+)
+
             self.speech_manager = SpeechRecognitionManager(
                 mic_device_index=self.config.mic_device_index,
                 start_key=self.config.push_to_talk_start_key,
@@ -111,7 +118,8 @@ class VoiceAssistant:
             try:
 
                 self.vision_loop = VisionLoop(
-                    interval=15
+                    interval=15,
+                    event_manager=self.event_manager
                 )
 
                 self.ai_manager.vision_loop = self.vision_loop
@@ -413,9 +421,110 @@ class VoiceAssistant:
 
 
 
+    def process_events(self):
+
+        logger.info(
+            "Event processor started"
+        )
+
+        while self.running:
+
+            try:
+
+                event = self.event_manager.get_event()
+
+                if not event:
+
+                    time.sleep(1)
+                    continue
+
+
+                event_type = event.get(
+                    "type"
+                )
+
+                data = event.get(
+                    "data",
+                    {}
+                )
+
+
+                if event_type == "vision":
+
+                    description = data.get(
+                        "description"
+                    )
+
+                    logger.info(
+                        "Processing vision event"
+                    )
+
+                    self.reaction_manager.react(
+                        description
+                    )
+
+
+                elif event_type == "chat":
+
+                    username = data.get(
+                        "username"
+                    )
+
+                    message = data.get(
+                        "message"
+                    )
+
+
+                    logger.info(
+                        f"Processing chat from {username}"
+                    )
+
+
+                    prompt = f"""
+A viewer named {username} said:
+
+{message}
+
+Reply like a livestream co-host.
+Keep it short, entertaining and natural.
+"""
+
+
+                    response = self.ai_manager.chat_with_history(
+                        prompt
+                    )
+
+
+                    self.tts_manager.synthesize_and_play(
+                        response
+                    )
+
+
+            except Exception as e:
+
+                logger.error(
+                    f"Event processor error: {e}"
+                )
     def start(self):
 
         self.running = True
+
+
+        if self.tiktok_manager:
+
+            try:
+
+                self.tiktok_manager.start()
+
+                logger.info(
+                    "TikTok chat started"
+                )
+
+            except Exception as e:
+
+                logger.warning(
+                    f"TikTok startup failed: {e}"
+                )
 
 
         # Start vision monitoring
@@ -449,9 +558,6 @@ class VoiceAssistant:
                 logger.warning(
                     f"Vision start failed: {e}"
                 )
-                logger.warning(
-                    f"Vision start failed: {e}"
-                )
 
 
 
@@ -470,10 +576,17 @@ class VoiceAssistant:
             daemon=True
         )
 
+        event_thread = threading.Thread(
+            target=self.process_events,
+            daemon=True
+        )
+
 
         udp_thread.start()
 
         process_thread.start()
+
+        event_thread.start()
 
 
 
