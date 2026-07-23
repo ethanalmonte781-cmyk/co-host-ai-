@@ -212,17 +212,6 @@ Your job is to entertain, engage, and bring the stream to life — one message a
             ValueError: If required environment variables are missing
             FileNotFoundError: If required files don't exist
         """
-        if not self.google_credentials_path:
-            raise ValueError(
-                "GOOGLE_CREDENTIALS_PATH environment variable is required. "
-                "Please set it to the path of your Google Cloud credentials JSON file."
-            )
-
-        if not os.path.exists(self.google_credentials_path):
-            raise FileNotFoundError(
-                f"Google credentials file not found: {self.google_credentials_path}. "
-                f"Please ensure the file exists and the path is correct."
-            )
 
         # Validate port ranges
         if not (1 <= self.udp_port <= 65535):
