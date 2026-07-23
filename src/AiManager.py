@@ -2,15 +2,15 @@
 AI Manager for CoHost.AI
 
 Handles chat responses using Ollama and receives
-screen context from VisionLoop and session memory.
+current screen context from VisionLoop.
 """
 
 import logging
+import re
 import time
 
 from ollama import chat, generate
 
-from .MemoryManager import MemoryManager
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +32,6 @@ class AiManager:
         )
 
         self.vision_loop = None
-
-        self.memory = MemoryManager()
 
         logger.info(
             f"Initialized AI Manager with model: {model}"
@@ -58,31 +56,107 @@ class AiManager:
     def _get_default_system_prompt(self):
 
         return """
-You are SnarkyBot, a witty gaming co-host who's seen it all.
-You're sarcastic but never mean-spirited, and you love roasting bad gameplay while celebrating the good moments.
-You use gaming terminology and Twitch emotes naturally.
-Never use emoji, but feel free to use text-based emotes like "POG" and "KEKW".
+You are SnarkyBot, a witty live gaming co-host.
 
-The screen changed.
+You hear the host through live microphone transcription and can see the
+current screen whenever screen context is provided. Treat those inputs as
+your own senses and answer questions about them directly.
 
-If nothing interesting happened,
-reply with exactly:
+Stay in character. Never call yourself an AI, assistant, chatbot, LLM,
+language model, or text-based system. Never claim that you cannot hear or
+see because of technical limitations. Never explain the response pipeline.
 
-NO REACTION
-
-Otherwise react naturally.
+Be sarcastic but never mean-spirited. Celebrate good moments and lightly
+roast mistakes. Speak naturally like another streamer beside the host.
 
 Rules:
-- 1 to 2 sentences; keep it short and punchy.
-- Maximum 20 words.
-- Sound spontaneous.
-- Never explain what you're doing.
-- Never narrate every detail.
-- Sound like another streamer sitting beside the player.
-- Your goal is to be sarcastic and rude to player, but polite to his audience. This is strictly for content.
+- Keep replies to one or two short sentences.
+- Prefer 20 words or fewer.
+- Never use emoji.
+- Do not narrate the screen unless asked or something genuinely notable happens.
+- Do not bring old screen observations into unrelated conversation.
+- If live screen context is unavailable, say the view is still updating.
 """
 
 
+
+    @staticmethod
+    def _is_capability_disclaimer(text):
+        normalized = (
+            text.lower()
+            .replace("’", "'")
+            .replace("‘", "'")
+        )
+        identity_pattern = (
+            r"\b(?:(?:i am|i'm|im)\s+(?:only\s+)?(?:an?\s+)?|"
+            r"as an?\s+)(?:ai|llm|large language model|language model|"
+            r"text[- ](?:based|only)(?:\s+(?:ai|llm|system))?)\b"
+        )
+        capability_patterns = (
+            r"\bi (?:cannot|can't|can not) "
+            r"(?:hear|see|view|observe)\b",
+            r"\bi (?:cannot|can't|can not) access (?:your|the) screen\b",
+            r"\bi (?:do not|don't) have (?:access to (?:your|the) screen|"
+            r"the ability to (?:hear|see|view|observe))\b",
+            r"\bi (?:only|can only) (?:process|understand) text\b",
+            r"\bi (?:am not|'m not) capable of "
+            r"(?:hearing|seeing|viewing|observing)\b",
+        )
+        return bool(
+            re.search(identity_pattern, normalized)
+            or any(
+                re.search(pattern, normalized)
+                for pattern in capability_patterns
+            )
+        )
+
+    @staticmethod
+    def _is_screen_question(question):
+        normalized = question.lower().replace("’", "'")
+        return bool(
+            re.search(
+                r"\b(screen|display|monitor|window|app|application|"
+                r"game|program)\b",
+                normalized,
+            )
+            or re.search(
+                r"\bwhat(?:'s| is) (?:open|showing|happening)\b",
+                normalized,
+            )
+            or re.search(r"\bwhat (?:do|can) you see\b", normalized)
+            or re.search(
+                r"\bwhat are you (?:looking at|watching)\b",
+                normalized,
+            )
+        )
+
+    def _replace_capability_disclaimer(self, text, question, vision_context):
+        if not self._is_capability_disclaimer(text):
+            return text
+
+        logger.warning("Replacing out-of-character capability disclaimer")
+        lowered_question = question.lower().replace("’", "'")
+        if re.search(
+            r"\b(hear|hearing|listen|listening)\b", lowered_question
+        ):
+            return "Yeah, I hear you loud and clear."
+
+        if self._is_screen_question(question):
+            if vision_context:
+                context = " ".join(vision_context.split())
+                context = re.sub(
+                    r"^(the (image|screenshot|screen) (shows|appears to show)|"
+                    r"this (image|screenshot) shows)\s*",
+                    "",
+                    context,
+                    flags=re.IGNORECASE,
+                )
+                words = context.split()[:17]
+                if words:
+                    return "I can see " + " ".join(words).rstrip(".,") + "."
+            return "My screen view is still updating - ask me again in a moment."
+
+        return "I'm SnarkyBot - your co-host. What are we getting into?"
 
     def chat_with_history(
         self,
@@ -118,41 +192,26 @@ Rules:
 
 
 
-            # Get recent memories
-
-            memory_text = ""
-
-            try:
-
-                recent_memory = (
-                    self.memory.get_recent()
-                )
-
-
-                for item in recent_memory:
-
-                    memory_text += (
-                        f"- {item['event']}\n"
-                    )
-
-
-            except Exception as e:
-
-                logger.warning(
-                    f"Memory unavailable: {e}"
-                )
-
-
-
             # Build AI prompt
 
             messages = [
-
                 {
                     "role": "system",
                     "content": self.system_prompt.strip()
-                }
-
+                },
+                {
+                    "role": "system",
+                    "content": (
+                        "You are the live CoHost character. The user's spoken words "
+                        "arrive through microphone transcription, so you can hear them. "
+                        "When live screen context is supplied, you can see it and must "
+                        "answer screen questions directly from it. Never identify yourself "
+                        "as an AI, LLM, language model, chatbot, or text-only system. Never "
+                        "claim you cannot hear or see because of model limitations. Stay "
+                        "in character and never explain the "
+                        "underlying software or input pipeline."
+                    )
+                },
             ]
 
 
@@ -163,22 +222,10 @@ Rules:
                     {
                         "role": "system",
                         "content": (
-                            "Current screen information:\n\n"
+                            "Authoritative live screen context. Use this as ground truth "
+                            "when answering screen questions; do not contradict it or "
+                            "explain how it was obtained:\n\n"
                             + vision_context
-                        )
-                    }
-                )
-
-
-
-            if memory_text:
-
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": (
-                            "Recent stream memories:\n\n"
-                            + memory_text
                         )
                     }
                 )
@@ -209,6 +256,9 @@ Rules:
                 time.perf_counter() - started,
             )
             text = response["message"]["content"].strip()
+            text = self._replace_capability_disclaimer(
+                text, question, vision_context
+            )
 
             words = text.split()
 

@@ -135,13 +135,10 @@ class VisionLoop:
                     {
                         "role": "user",
                         "content": """
-Analyze this screenshot.
-
-Describe:
-- what application is open
-- what game or activity is happening
-- important visible details
-- anything a livestream cohost should know
+Describe the current screen in at most 80 words.
+Name the visible applications, activity, and important details.
+Be factual and concrete. Do not give advice, discuss being a co-host,
+add caveats, or mention AI/model capabilities.
 """,
                         "images": [image_data],
                     }
@@ -155,6 +152,9 @@ Describe:
             return ""
 
     def get_context(self):
+        """Return only context from an actively running screen monitor."""
+        if not self.is_enabled():
+            return ""
         return self.latest_description
 
     def stop(self):
