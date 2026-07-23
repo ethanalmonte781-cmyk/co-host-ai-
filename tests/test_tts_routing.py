@@ -42,6 +42,12 @@ class _FakeAudio:
     def get_device_info_by_index(self, index):
         return self.devices[index]
 
+    def get_host_api_info_by_index(self, index):
+        return {"name": {0: "MME", 1: "Windows DirectSound", 2: "Windows WASAPI"}[index]}
+
+    def get_default_output_device_info(self):
+        return self.devices[0]
+
     def open(self, **kwargs):
         self.open_args = kwargs
         owner = self
@@ -63,12 +69,13 @@ def test_input_side_focusrite_index_maps_to_focusrite_output():
     module = _load_module(lambda name: None)
     manager = module.TTSManager.__new__(module.TTSManager)
     manager._audio = _FakeAudio([
-        {"name": "Default", "maxOutputChannels": 2},
-        {"name": "Analogue 1 + 2 (Focusrite USB Audio)", "maxInputChannels": 2, "maxOutputChannels": 0},
-        {"name": "Headphones (Focusrite USB Audio)", "maxOutputChannels": 2},
+        {"name": "Default", "maxOutputChannels": 2, "hostApi": 0, "defaultSampleRate": 44100},
+        {"name": "Analogue 1 + 2 (Focusrite USB Audio)", "maxInputChannels": 2, "maxOutputChannels": 0, "hostApi": 0},
+        {"name": "Headphones (Focusrite USB Audio)", "maxOutputChannels": 2, "hostApi": 0, "defaultSampleRate": 44100},
+        {"name": "Headphones (Focusrite USB Audio)", "maxOutputChannels": 2, "hostApi": 2, "defaultSampleRate": 48000},
     ])
 
-    assert manager._resolve_output_device(1) == 2
+    assert manager._resolve_output_device(1) == 3
 
 
 def test_sapi_pcm_is_played_through_configured_pyaudio_device():
@@ -82,6 +89,7 @@ def test_sapi_pcm_is_played_through_configured_pyaudio_device():
     manager = module.TTSManager.__new__(module.TTSManager)
     manager._audio = _FakeAudio([])
     manager.output_device_index = 7
+    manager.output_sample_rate = 48000
     manager.buffer_size = 4096
 
     class Voice:
@@ -94,5 +102,5 @@ def test_sapi_pcm_is_played_through_configured_pyaudio_device():
 
     assert audio_format.Type == manager._SAPI_22KHZ_16BIT_MONO
     assert manager._audio.open_args["output_device_index"] == 7
-    assert manager._audio.open_args["rate"] == 22050
-    assert manager._audio.written == b"pcm-data"
+    assert manager._audio.open_args["rate"] == 48000
+    assert len(manager._audio.written) > len(b"pcm-data")

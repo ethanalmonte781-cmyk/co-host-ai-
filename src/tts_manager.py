@@ -6,6 +6,7 @@ import queue
 import threading
 import time
 
+import numpy as np
 import pyaudio
 import pythoncom
 import win32com.client
@@ -33,6 +34,7 @@ class TTSManager:
         self.obs_manager = None
         self._audio = pyaudio.PyAudio()
         self.output_device_index = self._resolve_output_device(device_index)
+        self.output_sample_rate = self._get_output_sample_rate()
         self.speech_queue = queue.PriorityQueue()
         self._sequence = itertools.count()
         self.running = True
@@ -86,6 +88,20 @@ class TTSManager:
         hint = next((value for value in interface_hints if value in configured_name), None)
         matches = [item for item in output_devices if hint and hint in item[1].get("name", "").lower()]
         if matches:
+            host_priority = {
+                "Windows WASAPI": 0,
+                "Windows DirectSound": 1,
+                "MME": 2,
+                "Windows WDM-KS": 3,
+            }
+            matches.sort(
+                key=lambda item: host_priority.get(
+                    self._audio.get_host_api_info_by_index(
+                        item[1].get("hostApi", -1)
+                    ).get("name", ""),
+                    99,
+                )
+            )
             index, info = matches[0]
             logger.warning(
                 "AUDIO_DEVICE_INDEX=%s is input-only; using matching output %s: %s",
@@ -100,6 +116,28 @@ class TTSManager:
             configured_index,
         )
         return None
+
+    def _get_output_sample_rate(self):
+        if self.output_device_index is None:
+            info = self._audio.get_default_output_device_info()
+        else:
+            info = self._audio.get_device_info_by_index(self.output_device_index)
+        sample_rate = int(info.get("defaultSampleRate", self._SAMPLE_RATE))
+        logger.info("TTS playback sample rate: %s Hz", sample_rate)
+        return sample_rate
+
+    @staticmethod
+    def _resample_pcm(pcm_audio, source_rate, target_rate):
+        if source_rate == target_rate:
+            return pcm_audio
+        samples = np.frombuffer(pcm_audio, dtype=np.int16)
+        if len(samples) < 2:
+            return pcm_audio
+        target_count = round(len(samples) * target_rate / source_rate)
+        source_positions = np.arange(len(samples), dtype=np.float64)
+        target_positions = np.linspace(0, len(samples) - 1, target_count)
+        converted = np.interp(target_positions, source_positions, samples)
+        return converted.astype(np.int16).tobytes()
 
     def _initialize_obs(self):
         try:
@@ -145,11 +183,14 @@ class TTSManager:
         voice.AudioOutputStream = memory_stream
         voice.Speak(text)
         pcm_audio = bytes(memory_stream.GetData())
+        pcm_audio = self._resample_pcm(
+            pcm_audio, self._SAMPLE_RATE, self.output_sample_rate
+        )
 
         playback = self._audio.open(
             format=pyaudio.paInt16,
             channels=1,
-            rate=self._SAMPLE_RATE,
+            rate=self.output_sample_rate,
             output=True,
             output_device_index=self.output_device_index,
             frames_per_buffer=self.buffer_size,
