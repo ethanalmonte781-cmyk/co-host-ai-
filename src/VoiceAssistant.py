@@ -22,6 +22,7 @@ from typing import Optional, List, Dict
 from .TikTokChatManager import TikTokChatManager
 from .ChatFilter import ChatFilter
 from rich.console import Console
+from pynput import keyboard
 from .EventManager import EventManager
 from .ReactionManager import ReactionManager
 from .ObservationLoop import ObservationLoop
@@ -53,6 +54,7 @@ class VoiceAssistant:
         self.udp_socket = None
         self.running = False
         self.tiktok_manager = None
+        self.vision_hotkey_listener = None
 
         self.cli = CLIInterface(
             show_detailed_logs=self.config.show_detailed_logs,
@@ -274,6 +276,48 @@ class VoiceAssistant:
 
 
 
+    def _start_vision_hotkey(self):
+
+        if not self.vision_loop or self.vision_hotkey_listener:
+
+            return
+
+
+        try:
+
+            self.vision_hotkey_listener = keyboard.GlobalHotKeys(
+                {"<ctrl>+m": self._toggle_vision}
+            )
+
+            self.vision_hotkey_listener.start()
+
+            logger.info(
+                "Vision toggle hotkey started: Ctrl+M"
+            )
+
+
+        except Exception as e:
+
+            self.vision_hotkey_listener = None
+
+            logger.warning(
+                f"Vision hotkey startup failed: {e}"
+            )
+
+
+    def _toggle_vision(self):
+
+        if not self.vision_loop:
+
+            logger.warning(
+                "Vision toggle requested but vision is unavailable"
+            )
+
+            return
+
+
+        self.vision_loop.toggle_enabled()
+
     def process_question(self):
 
         logger.info(
@@ -461,6 +505,14 @@ class VoiceAssistant:
                         description
                     )
 
+                elif event_type == "vision_status":
+
+                    self.cli.log_info(
+                        data.get(
+                            "message",
+                            "Vision enabled" if data.get("enabled") else "Vision disabled"
+                        )
+                    )
 
                 elif event_type == "chat":
 
@@ -531,6 +583,8 @@ Keep it short, entertaining and natural.
             try:
 
                 self.vision_loop.start()
+
+                self._start_vision_hotkey()
 
                 logger.info(
                     "Vision monitoring started"
@@ -634,6 +688,21 @@ Keep it short, entertaining and natural.
         self.running = False
 
 
+        if self.vision_hotkey_listener:
+
+            try:
+
+                self.vision_hotkey_listener.stop()
+
+            except Exception as e:
+
+                logger.warning(
+                    f"Vision hotkey shutdown error: {e}"
+                )
+
+            finally:
+
+                self.vision_hotkey_listener = None
 
         if self.vision_loop:
 
