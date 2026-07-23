@@ -90,6 +90,7 @@ def test_sapi_pcm_is_played_through_configured_pyaudio_device():
     manager._audio = _FakeAudio([])
     manager.output_device_index = 7
     manager.output_sample_rate = 48000
+    manager.output_channels = 2
     manager.buffer_size = 4096
 
     class Voice:
@@ -103,4 +104,5 @@ def test_sapi_pcm_is_played_through_configured_pyaudio_device():
     assert audio_format.Type == manager._SAPI_22KHZ_16BIT_MONO
     assert manager._audio.open_args["output_device_index"] == 7
     assert manager._audio.open_args["rate"] == 48000
+    assert manager._audio.open_args["channels"] == 2
     assert len(manager._audio.written) > len(b"pcm-data")

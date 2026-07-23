@@ -35,6 +35,7 @@ class TTSManager:
         self._audio = pyaudio.PyAudio()
         self.output_device_index = self._resolve_output_device(device_index)
         self.output_sample_rate = self._get_output_sample_rate()
+        self.output_channels = self._get_output_channels()
         self.speech_queue = queue.PriorityQueue()
         self._sequence = itertools.count()
         self.running = True
@@ -126,6 +127,13 @@ class TTSManager:
         logger.info("TTS playback sample rate: %s Hz", sample_rate)
         return sample_rate
 
+    def _get_output_channels(self):
+        if self.output_device_index is None:
+            info = self._audio.get_default_output_device_info()
+        else:
+            info = self._audio.get_device_info_by_index(self.output_device_index)
+        return min(2, max(1, int(info.get("maxOutputChannels", 1))))
+
     @staticmethod
     def _resample_pcm(pcm_audio, source_rate, target_rate):
         if source_rate == target_rate:
@@ -186,10 +194,13 @@ class TTSManager:
         pcm_audio = self._resample_pcm(
             pcm_audio, self._SAMPLE_RATE, self.output_sample_rate
         )
+        if self.output_channels == 2:
+            mono = np.frombuffer(pcm_audio, dtype=np.int16)
+            pcm_audio = np.column_stack((mono, mono)).astype(np.int16).tobytes()
 
         playback = self._audio.open(
             format=pyaudio.paInt16,
-            channels=1,
+            channels=self.output_channels,
             rate=self.output_sample_rate,
             output=True,
             output_device_index=self.output_device_index,
