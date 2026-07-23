@@ -52,7 +52,7 @@ class ReactionManager:
     ):
 
 
-        if not observation or len(observation.strip())) < 20:
+        if not observation or len(observation.strip()) < 20:
 
             return
 
