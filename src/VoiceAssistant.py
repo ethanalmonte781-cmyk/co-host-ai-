@@ -374,7 +374,8 @@ class VoiceAssistant:
                     response,
                     scene_name=self.config.obs_scene_name,
                     bot_source=self.config.obs_bot_source,
-                    top_source=self.config.obs_top_source
+                    top_source=self.config.obs_top_source,
+                    priority=0
                 )
 
 
@@ -743,6 +744,18 @@ Keep it short, entertaining and natural.
             except:
 
                 pass
+
+
+
+        try:
+
+            self.tts_manager.cleanup()
+
+        except Exception as e:
+
+            logger.warning(
+                f"TTS shutdown error: {e}"
+            )
 
 
 

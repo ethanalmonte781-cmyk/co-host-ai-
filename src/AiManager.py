@@ -6,8 +6,9 @@ screen context from VisionLoop and session memory.
 """
 
 import logging
+import time
 
-from ollama import chat
+from ollama import chat, generate
 
 from .MemoryManager import MemoryManager
 
@@ -37,8 +38,22 @@ class AiManager:
         logger.info(
             f"Initialized AI Manager with model: {model}"
         )
+        self._warm_up_model()
 
 
+
+    def _warm_up_model(self):
+        """Load the chat model before the first live question and keep it resident."""
+        started = time.perf_counter()
+        try:
+            generate(model=self.model, prompt="", keep_alive=-1)
+            logger.info(
+                "Ollama model %s warmed in %.1f seconds",
+                self.model,
+                time.perf_counter() - started,
+            )
+        except Exception:
+            logger.exception("Ollama model warm-up failed; continuing")
 
     def _get_default_system_prompt(self):
 
@@ -177,15 +192,22 @@ Rules:
                 }
             )
 
+            started = time.perf_counter()
             response = chat(
                 model=self.model,
                 messages=messages,
                 options={
-                    "num_predict": 60,
+                    "num_predict": 40,
+                    "num_ctx": 2048,
                     "temperature": 0.8
-                }
+                },
+                keep_alive=-1,
             )
 
+            logger.info(
+                "Ollama response completed in %.1f seconds",
+                time.perf_counter() - started,
+            )
             text = response["message"]["content"].strip()
 
             words = text.split()

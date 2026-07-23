@@ -8,6 +8,7 @@ ollama
 # Audio processing
 pyaudio
 google-cloud-texttospeech
+pywin32
 
 # Speech recognition
 faster-whisper

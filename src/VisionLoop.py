@@ -146,6 +146,8 @@ Describe:
                         "images": [image_data],
                     }
                 ],
+                options={"num_gpu": 0, "num_thread": 4, "num_ctx": 2048},
+                keep_alive="30m",
             )
             return response["message"]["content"]
         except Exception:
