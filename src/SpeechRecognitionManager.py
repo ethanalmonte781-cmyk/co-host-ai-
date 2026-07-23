@@ -61,34 +61,58 @@ class SpeechRecognitionManager:
 
     def _load_model(self):
         model_name = os.getenv("FASTER_WHISPER_MODEL", "tiny.en")
+        self._model_name = model_name
         if ctranslate2.get_cuda_device_count() > 0:
             try:
                 model = WhisperModel(model_name, device="cuda", compute_type="float16")
+                self._model_device = "cuda"
                 logger.info("faster-whisper model %s loaded on CUDA (float16)", model_name)
                 return model
             except Exception:
                 logger.exception("CUDA initialization failed; falling back to CPU")
         model = WhisperModel(model_name, device="cpu", compute_type="int8")
+        self._model_device = "cpu"
         logger.info("faster-whisper model %s loaded on CPU (int8)", model_name)
         return model
 
     def _warm_up_model(self):
-        """Pay one-time model initialization cost before the first live phrase."""
-        started = time.perf_counter()
+        """Validate inference now and fall back if the CUDA runtime is incomplete."""
         try:
-            segments, _ = self.model.transcribe(
-                np.zeros(self._SAMPLE_RATE, dtype=np.float32),
-                language=self.language, beam_size=1, best_of=1, temperature=0,
-                condition_on_previous_text=False, vad_filter=False,
-                without_timestamps=True,
-            )
-            list(segments)
-            logger.info(
-                "faster-whisper warm-up completed in %.0f ms",
-                (time.perf_counter() - started) * 1000,
-            )
+            self._run_warm_up()
         except Exception:
-            logger.exception("faster-whisper warm-up failed; continuing")
+            if self._model_device != "cuda":
+                logger.exception("faster-whisper warm-up failed; continuing")
+                return
+
+            logger.exception(
+                "CUDA inference failed during warm-up; switching to CPU (int8)"
+            )
+            self.model = WhisperModel(
+                self._model_name, device="cpu", compute_type="int8"
+            )
+            self._model_device = "cpu"
+            logger.info(
+                "faster-whisper model %s loaded on CPU (int8)", self._model_name
+            )
+            try:
+                self._run_warm_up()
+            except Exception:
+                logger.exception("CPU faster-whisper warm-up failed; continuing")
+
+    def _run_warm_up(self):
+        started = time.perf_counter()
+        segments, _ = self.model.transcribe(
+            np.zeros(self._SAMPLE_RATE, dtype=np.float32),
+            language=self.language, beam_size=1, best_of=1, temperature=0,
+            condition_on_previous_text=False, vad_filter=False,
+            without_timestamps=True,
+        )
+        list(segments)
+        logger.info(
+            "faster-whisper %s warm-up completed in %.0f ms",
+            self._model_device,
+            (time.perf_counter() - started) * 1000,
+        )
 
     def _notify_cli(self, event):
         if self._cli_callback:

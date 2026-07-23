@@ -90,8 +90,40 @@ def test_warm_up_consumes_lazy_inference_generator():
 
     manager.model = LazyModel()
     manager.language = "en"
+    manager._model_device = "cpu"
     manager._warm_up_model()
 
     assert consumed[0][0] == manager._SAMPLE_RATE
     assert consumed[0][1]["beam_size"] == 1
     assert consumed[0][1]["without_timestamps"] is True
+
+
+def test_cuda_inference_failure_falls_back_to_cpu():
+    module = _load_manager_module()
+    manager = _bare_manager(module)
+    manager.language = "en"
+    manager._model_name = "tiny.en"
+    manager._model_device = "cuda"
+    created = []
+
+    class BrokenCudaModel:
+        def transcribe(self, audio, **kwargs):
+            def segments():
+                raise RuntimeError("cublas64_12.dll is not found")
+                yield
+            return segments(), None
+
+    class WorkingCpuModel:
+        def transcribe(self, audio, **kwargs):
+            return iter(()), None
+
+    def create_model(name, **kwargs):
+        created.append((name, kwargs))
+        return WorkingCpuModel()
+
+    manager.model = BrokenCudaModel()
+    module.WhisperModel = create_model
+    manager._warm_up_model()
+
+    assert manager._model_device == "cpu"
+    assert created == [("tiny.en", {"device": "cpu", "compute_type": "int8"})]
