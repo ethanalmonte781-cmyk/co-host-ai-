@@ -1,146 +1,192 @@
-"""Continuous microphone speech recognition for CoHost.AI."""
+"""Low-latency, local microphone transcription with faster-whisper."""
 
 import logging
+import os
+import queue
 import threading
+from collections import deque
 from typing import Callable, Optional
 
-import speech_recognition as sr
-
+import ctranslate2
+import numpy as np
+import pyaudio
+from faster_whisper import WhisperModel
 
 logger = logging.getLogger(__name__)
 
 
 class SpeechRecognitionManager:
-    """Continuously transcribe spoken phrases on a background thread."""
+    """Continuously capture speech and transcribe it on a worker thread."""
 
-    _LISTEN_TIMEOUT_SECONDS = 1.0
-    _MAX_PHRASE_SECONDS = 6.0
+    _SAMPLE_RATE = 16000
+    _CHUNK_SAMPLES = 320  # 20 ms
+    _SILENCE_SECONDS = 0.35
+    _PRE_ROLL_SECONDS = 0.20
+    _ENERGY_THRESHOLD = 300
+    _MIN_PHRASE_SECONDS = 0.20
 
-    def __init__(
-        self,
-        mic_device_index: int = -1,
-        start_key: Optional[str] = None,
-        stop_key: Optional[str] = None,
-        language: str = "en-US",
-        timeout: float = 5.0,
-        on_speech_callback: Optional[Callable[[str], None]] = None,
-    ):
-        # start_key and stop_key are retained only for callers using the former API.
-        # Continuous listening does not use keyboard input.
-        del start_key, stop_key
-
+    def __init__(self, mic_device_index=-1, start_key=None, stop_key=None,
+                 language="en-US", timeout=5.0,
+                 on_speech_callback: Optional[Callable[[str], None]] = None):
+        del start_key, stop_key  # Compatibility with the former API.
         self.mic_device_index = mic_device_index
-        self.language = language
-        self.phrase_time_limit = min(max(timeout, 1.0), self._MAX_PHRASE_SECONDS)
+        self.language = language.split("-", 1)[0] or None
+        self.phrase_time_limit = max(timeout, 1.0)
         self.on_speech_callback = on_speech_callback
         self.is_listening = False
         self.listening_thread = None
+        self.transcription_thread = None
         self._cli_callback = None
+        self._stop_event = threading.Event()
+        self._audio_queue = queue.Queue(maxsize=2)
+        self._audio = pyaudio.PyAudio()
+        self._stream = None
+        self._log_microphones()
+        self.model = self._load_model()
 
-        self.recognizer = sr.Recognizer()
-        self.recognizer.energy_threshold = 300
-        self.recognizer.dynamic_energy_threshold = False
-        self.recognizer.pause_threshold = 0.5
-        self.recognizer.non_speaking_duration = 0.3
-        self.microphone = None
-        self._setup_microphone()
+    def _log_microphones(self):
+        logger.info("Available microphones:")
+        for index in range(self._audio.get_device_count()):
+            device = self._audio.get_device_info_by_index(index)
+            if device.get("maxInputChannels", 0) > 0:
+                logger.info("%s: %s", index, device.get("name", "Unknown"))
+        if self.mic_device_index >= 0:
+            device = self._audio.get_device_info_by_index(self.mic_device_index)
+            if device.get("maxInputChannels", 0) < 1:
+                raise ValueError(f"Audio device {self.mic_device_index} is not an input device")
 
-    def _setup_microphone(self):
-        """Open the configured microphone and calibrate the recognizer once."""
-        try:
-            logger.info("Available microphones:")
-            for index, name in enumerate(sr.Microphone.list_microphone_names()):
-                logger.info("%s: %s", index, name)
-
-            self.microphone = sr.Microphone(
-                device_index=self.mic_device_index,
-                sample_rate=44100,
-            )
-            logger.info("Opening microphone device %s", self.mic_device_index)
-            with self.microphone as source:
-                self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
-
-            logger.info(
-                "Microphone setup complete (energy threshold: %s)",
-                self.recognizer.energy_threshold,
-            )
-        except Exception:
-            logger.exception("Microphone setup failed")
-            raise
+    def _load_model(self):
+        model_name = os.getenv("FASTER_WHISPER_MODEL", "tiny.en")
+        if ctranslate2.get_cuda_device_count() > 0:
+            try:
+                model = WhisperModel(model_name, device="cuda", compute_type="float16")
+                logger.info("faster-whisper model %s loaded on CUDA (float16)", model_name)
+                return model
+            except Exception:
+                logger.exception("CUDA initialization failed; falling back to CPU")
+        model = WhisperModel(model_name, device="cpu", compute_type="int8")
+        logger.info("faster-whisper model %s loaded on CPU (int8)", model_name)
+        return model
 
     def _notify_cli(self, event):
         if self._cli_callback:
             self._cli_callback(event)
 
+    @staticmethod
+    def _energy(chunk):
+        samples = np.frombuffer(chunk, dtype=np.int16).astype(np.float32)
+        return float(np.sqrt(np.mean(samples * samples)))
+
+    def _queue_phrase(self, chunks):
+        samples = np.frombuffer(b"".join(chunks), dtype=np.int16).astype(np.float32)
+        if len(samples) < int(self._MIN_PHRASE_SECONDS * self._SAMPLE_RATE):
+            self._notify_cli("recording_stop")
+            return
+        samples /= 32768.0
+        try:
+            self._audio_queue.put_nowait(samples)
+        except queue.Full:
+            logger.warning("Dropping phrase because transcription is still busy")
+            self._notify_cli("recording_stop")
+
     def _continuous_listen(self):
-        """Capture one spoken phrase at a time until listening is stopped."""
-        logger.info("Continuous speech listening started")
-
-        with self.microphone as source:
-            while self.is_listening:
-                try:
-                    audio = self.recognizer.listen(
-                        source,
-                        timeout=self._LISTEN_TIMEOUT_SECONDS,
-                        phrase_time_limit=self.phrase_time_limit,
-                    )
-                except sr.WaitTimeoutError:
+        """Capture continuously while the independent worker transcribes."""
+        chunk_seconds = self._CHUNK_SAMPLES / self._SAMPLE_RATE
+        pre_roll = deque(maxlen=int(self._PRE_ROLL_SECONDS / chunk_seconds))
+        silence_count = int(self._SILENCE_SECONDS / chunk_seconds)
+        max_count = int(self.phrase_time_limit / chunk_seconds)
+        phrase, quiet = [], 0
+        try:
+            self._stream = self._audio.open(
+                format=pyaudio.paInt16, channels=1, rate=self._SAMPLE_RATE,
+                input=True,
+                input_device_index=None if self.mic_device_index < 0 else self.mic_device_index,
+                frames_per_buffer=self._CHUNK_SAMPLES,
+            )
+            logger.info("Continuous speech listening started")
+            while not self._stop_event.is_set():
+                chunk = self._stream.read(self._CHUNK_SAMPLES, exception_on_overflow=False)
+                speaking = self._energy(chunk) >= self._ENERGY_THRESHOLD
+                if not phrase:
+                    pre_roll.append(chunk)
+                    if speaking:
+                        phrase = list(pre_roll)
+                        pre_roll.clear()
+                        quiet = 0
+                        self._notify_cli("recording_start")
                     continue
-                except Exception:
-                    logger.exception("Microphone listening error")
-                    continue
+                phrase.append(chunk)
+                quiet = 0 if speaking else quiet + 1
+                if quiet >= silence_count or len(phrase) >= max_count:
+                    self._queue_phrase(phrase[:-quiet] if quiet else phrase)
+                    phrase, quiet = [], 0
+        except Exception:
+            if not self._stop_event.is_set():
+                logger.exception("Microphone listening error")
+        finally:
+            if phrase:
+                self._queue_phrase(phrase)
+            logger.info("Continuous speech listening stopped")
 
-                logger.info("Speech detected; recognizing phrase")
-                self._notify_cli("recording_start")
-                try:
-                    text = self.recognizer.recognize_google(
-                        audio,
-                        language=self.language,
-                    ).strip()
-                    if not text:
-                        logger.warning("Google speech recognition returned empty text")
-                        continue
-
+    def _transcribe(self):
+        while True:
+            audio = self._audio_queue.get()
+            if audio is None:
+                self._audio_queue.task_done()
+                return
+            try:
+                segments, _ = self.model.transcribe(
+                    audio, language=self.language, beam_size=1, best_of=1,
+                    temperature=0, condition_on_previous_text=False,
+                    vad_filter=False, without_timestamps=True,
+                )
+                text = " ".join(segment.text.strip() for segment in segments).strip()
+                if text:
                     logger.info("Recognized speech: %s", text)
                     if self.on_speech_callback:
                         self.on_speech_callback(text)
-                    else:
-                        logger.warning("Recognized speech has no callback to receive it")
-                except sr.UnknownValueError:
-                    logger.warning("Speech was captured but could not be understood")
-                except sr.RequestError as error:
-                    logger.error("Google speech recognition request failed: %s", error)
-                except Exception:
-                    logger.exception("Speech recognition error")
-                finally:
-                    self._notify_cli("recording_stop")
-
-        logger.info("Continuous speech listening stopped")
+            except Exception:
+                logger.exception("Local speech recognition error")
+            finally:
+                self._notify_cli("recording_stop")
+                self._audio_queue.task_done()
 
     def start_listening(self):
-        """Start continuous listening without blocking the assistant thread."""
         if self.is_listening:
-            logger.debug("Continuous speech listener is already running")
             return
-
         self.is_listening = True
+        self._stop_event.clear()
+        self.transcription_thread = threading.Thread(
+            target=self._transcribe, name="speech-transcription", daemon=True)
         self.listening_thread = threading.Thread(
-            target=self._continuous_listen,
-            name="speech-recognition",
-            daemon=True,
-        )
+            target=self._continuous_listen, name="speech-capture", daemon=True)
+        self.transcription_thread.start()
         self.listening_thread.start()
-        logger.info("Continuous speech recognition started")
+        logger.info("Continuous local speech recognition started")
 
     def stop_listening(self):
         self.is_listening = False
+        self._stop_event.set()
+        if self._stream:
+            self._stream.stop_stream()
+            self._stream.close()
+            self._stream = None
         if self.listening_thread:
-            self.listening_thread.join(timeout=self._LISTEN_TIMEOUT_SECONDS + 1)
+            self.listening_thread.join(timeout=1.0)
             self.listening_thread = None
-        logger.info("Continuous speech recognition stopped")
+        if self.transcription_thread:
+            self._audio_queue.put(None)
+            self.transcription_thread.join(timeout=2.0)
+            self.transcription_thread = None
+        logger.info("Continuous local speech recognition stopped")
 
     def set_cli_callback(self, callback):
         self._cli_callback = callback
 
     def is_available(self):
-        return self.microphone is not None
+        return self._audio is not None and self.model is not None
+
+    def __del__(self):
+        audio = getattr(self, "_audio", None)
+        if audio:
+            audio.terminate()

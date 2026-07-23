@@ -10,7 +10,7 @@ pyaudio
 google-cloud-texttospeech
 
 # Speech recognition
-SpeechRecognition
+faster-whisper
 pynput
 
 # OBS integration

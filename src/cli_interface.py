@@ -130,8 +130,7 @@ class CLIInterface:
     def _create_footer(self) -> Panel:
         """Create the footer panel."""
         controls = [
-            "🎤 F1: Start Recording",
-            "🛑 F2: Stop Recording", 
+            "🎤 Ctrl+M: Start/Stop Recording",
             "❌ Ctrl+C: Exit"
         ]
         
@@ -253,7 +252,7 @@ class CLIInterface:
             "[bold green]🚀 CoHost.AI Started![/bold green]\n\n"
             "[cyan]Features enabled:[/cyan]\n"
             "• 📡 UDP broadcast listening\n"
-            "• 🎤 Speech recognition (F1/F2)\n"
+            "• 🎤 Local speech recognition\n"
             "• 🤖 AI responses via Ollama\n"
             "• 🔊 Text-to-speech with caching\n"
             "• 📺 OBS integration\n"
