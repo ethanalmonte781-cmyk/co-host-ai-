@@ -101,8 +101,6 @@ class VoiceAssistant:
 
             self.speech_manager = SpeechRecognitionManager(
                 mic_device_index=self.config.mic_device_index,
-                start_key=self.config.push_to_talk_start_key,
-                stop_key=self.config.push_to_talk_stop_key,
                 language=self.config.speech_recognition_language,
                 timeout=self.config.speech_recognition_timeout,
                 on_speech_callback=self._on_speech_recognized
@@ -597,7 +595,7 @@ Keep it short, entertaining and natural.
                 self.speech_manager.start_listening()
 
                 logger.info(
-                    "Speech recognition started"
+                    "Continuous speech recognition started"
                 )
 
 

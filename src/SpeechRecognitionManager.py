@@ -1,47 +1,47 @@
-"""Push-to-talk microphone speech recognition for CoHost.AI."""
+"""Continuous microphone speech recognition for CoHost.AI."""
 
 import logging
 import threading
 from typing import Callable, Optional
 
 import speech_recognition as sr
-from pynput import keyboard
 
 
 logger = logging.getLogger(__name__)
 
 
 class SpeechRecognitionManager:
-    """Capture one phrase on F1 and send its Google transcription to a callback."""
+    """Continuously transcribe spoken phrases on a background thread."""
+
+    _LISTEN_TIMEOUT_SECONDS = 1.0
+    _MAX_PHRASE_SECONDS = 6.0
 
     def __init__(
         self,
         mic_device_index: int = -1,
-        start_key: str = "F1",
-        stop_key: str = "F2",
+        start_key: Optional[str] = None,
+        stop_key: Optional[str] = None,
         language: str = "en-US",
         timeout: float = 5.0,
         on_speech_callback: Optional[Callable[[str], None]] = None,
     ):
+        # start_key and stop_key are retained only for callers using the former API.
+        # Continuous listening does not use keyboard input.
+        del start_key, stop_key
+
         self.mic_device_index = mic_device_index
-        self.start_key = start_key
-        self.stop_key = stop_key
         self.language = language
-        self.timeout = timeout
+        self.phrase_time_limit = min(max(timeout, 1.0), self._MAX_PHRASE_SECONDS)
         self.on_speech_callback = on_speech_callback
         self.is_listening = False
-        self.is_recording = False
-        self.is_listening_for_keys = False
-        self.keyboard_listener = None
-        self.recording_thread = None
+        self.listening_thread = None
         self._cli_callback = None
+
         self.recognizer = sr.Recognizer()
         self.recognizer.energy_threshold = 300
         self.recognizer.dynamic_energy_threshold = False
-        self.recognizer.dynamic_energy_adjustment_damping = 0.15
-        self.recognizer.dynamic_energy_adjustment_ratio = 1.5
-        self.recognizer.pause_threshold = 0.8
-        self.recognizer.non_speaking_duration = 0.5
+        self.recognizer.pause_threshold = 0.5
+        self.recognizer.non_speaking_duration = 0.3
         self.microphone = None
         self._setup_microphone()
 
@@ -51,106 +51,93 @@ class SpeechRecognitionManager:
             logger.info("Available microphones:")
             for index, name in enumerate(sr.Microphone.list_microphone_names()):
                 logger.info("%s: %s", index, name)
-            self.microphone = sr.Microphone(device_index=self.mic_device_index, sample_rate=44100)
+
+            self.microphone = sr.Microphone(
+                device_index=self.mic_device_index,
+                sample_rate=44100,
+            )
             logger.info("Opening microphone device %s", self.mic_device_index)
             with self.microphone as source:
-                logger.info("Adjusting for ambient noise...")
-                self.recognizer.adjust_for_ambient_noise(source, duration=1)
-            logger.info("Microphone setup complete (energy threshold: %s)", self.recognizer.energy_threshold)
+                self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
+
+            logger.info(
+                "Microphone setup complete (energy threshold: %s)",
+                self.recognizer.energy_threshold,
+            )
         except Exception:
             logger.exception("Microphone setup failed")
             raise
-
-    @staticmethod
-    def _normalize_key_name(value):
-        return str(value).strip().lower()
-
-    def _key_name(self, key):
-        if isinstance(key, keyboard.KeyCode):
-            return self._normalize_key_name(key.char)
-        name = getattr(key, "name", None)
-        if name:
-            return self._normalize_key_name(name)
-        return self._normalize_key_name(key)
-
-    def _matches_key(self, key, configured_key):
-        return self._key_name(key) == self._normalize_key_name(configured_key)
 
     def _notify_cli(self, event):
         if self._cli_callback:
             self._cli_callback(event)
 
-    def _on_key_press(self, key):
-        if not self.is_listening_for_keys:
-            return
-        if self._matches_key(key, self.start_key):
-            self.start_recording()
-        elif self._matches_key(key, self.stop_key):
-            self.stop_recording()
+    def _continuous_listen(self):
+        """Capture one spoken phrase at a time until listening is stopped."""
+        logger.info("Continuous speech listening started")
 
-    def _record_once(self):
-        """Record a bounded phrase, transcribe it, and deliver the text."""
-        try:
-            logger.info("Listening for speech...")
-            with self.microphone as source:
-                audio = self.recognizer.listen(source, timeout=self.timeout, phrase_time_limit=self.timeout)
-            logger.info("Sending captured speech to Google recognition...")
-            text = self.recognizer.recognize_google(audio, language=self.language).strip()
-            if not text:
-                logger.warning("Google speech recognition returned empty text")
-                return
-            logger.info("Recognized speech: %s", text)
-            if self.on_speech_callback:
-                self.on_speech_callback(text)
-            else:
-                logger.warning("Recognized speech has no callback to receive it")
-        except sr.WaitTimeoutError:
-            logger.warning("No speech detected before the microphone timeout expired")
-        except sr.UnknownValueError:
-            logger.warning("Speech was captured but could not be understood")
-        except sr.RequestError as error:
-            logger.error("Google speech recognition request failed: %s", error)
-        except Exception:
-            logger.exception("Speech recognition error")
-        finally:
-            self.is_recording = False
-            self._notify_cli("recording_stop")
+        with self.microphone as source:
+            while self.is_listening:
+                try:
+                    audio = self.recognizer.listen(
+                        source,
+                        timeout=self._LISTEN_TIMEOUT_SECONDS,
+                        phrase_time_limit=self.phrase_time_limit,
+                    )
+                except sr.WaitTimeoutError:
+                    continue
+                except Exception:
+                    logger.exception("Microphone listening error")
+                    continue
+
+                logger.info("Speech detected; recognizing phrase")
+                self._notify_cli("recording_start")
+                try:
+                    text = self.recognizer.recognize_google(
+                        audio,
+                        language=self.language,
+                    ).strip()
+                    if not text:
+                        logger.warning("Google speech recognition returned empty text")
+                        continue
+
+                    logger.info("Recognized speech: %s", text)
+                    if self.on_speech_callback:
+                        self.on_speech_callback(text)
+                    else:
+                        logger.warning("Recognized speech has no callback to receive it")
+                except sr.UnknownValueError:
+                    logger.warning("Speech was captured but could not be understood")
+                except sr.RequestError as error:
+                    logger.error("Google speech recognition request failed: %s", error)
+                except Exception:
+                    logger.exception("Speech recognition error")
+                finally:
+                    self._notify_cli("recording_stop")
+
+        logger.info("Continuous speech listening stopped")
 
     def start_listening(self):
+        """Start continuous listening without blocking the assistant thread."""
         if self.is_listening:
+            logger.debug("Continuous speech listener is already running")
             return
+
         self.is_listening = True
-        self.is_listening_for_keys = True
-        self.keyboard_listener = keyboard.Listener(on_press=self._on_key_press)
-        self.keyboard_listener.start()
-        logger.info("Started push-to-talk microphone hotkeys: %s=record, %s=stop/status", self.start_key, self.stop_key)
+        self.listening_thread = threading.Thread(
+            target=self._continuous_listen,
+            name="speech-recognition",
+            daemon=True,
+        )
+        self.listening_thread.start()
+        logger.info("Continuous speech recognition started")
 
     def stop_listening(self):
         self.is_listening = False
-        self.is_listening_for_keys = False
-        if self.keyboard_listener:
-            self.keyboard_listener.stop()
-            self.keyboard_listener = None
-        if self.recording_thread:
-            self.recording_thread.join(timeout=2)
-            self.recording_thread = None
-        logger.info("Stopped microphone listening")
-
-    def start_recording(self):
-        if self.is_recording:
-            logger.info("Speech recording already in progress")
-            return
-        self.is_recording = True
-        self._notify_cli("recording_start")
-        self.recording_thread = threading.Thread(target=self._record_once, daemon=True)
-        self.recording_thread.start()
-        logger.info("Started speech recording")
-
-    def stop_recording(self):
-        if not self.is_recording:
-            logger.info("No active speech recording to stop")
-            return
-        logger.info("Speech recording will finish when the current phrase or timeout ends")
+        if self.listening_thread:
+            self.listening_thread.join(timeout=self._LISTEN_TIMEOUT_SECONDS + 1)
+            self.listening_thread = None
+        logger.info("Continuous speech recognition stopped")
 
     def set_cli_callback(self, callback):
         self._cli_callback = callback
