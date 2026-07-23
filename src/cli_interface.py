@@ -130,7 +130,7 @@ class CLIInterface:
     def _create_footer(self) -> Panel:
         """Create the footer panel."""
         controls = [
-            "🎤 Ctrl+M: Start/Stop Recording",
+            "🎤 Ctrl+M: Toggle Vision",
             "❌ Ctrl+C: Exit"
         ]
         

@@ -4,6 +4,7 @@ import logging
 import os
 import queue
 import threading
+import time
 from collections import deque
 from typing import Callable, Optional
 
@@ -37,12 +38,15 @@ class SpeechRecognitionManager:
         self.listening_thread = None
         self.transcription_thread = None
         self._cli_callback = None
+        self._recording_active = False
+        self._recording_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._audio_queue = queue.Queue(maxsize=2)
         self._audio = pyaudio.PyAudio()
         self._stream = None
         self._log_microphones()
         self.model = self._load_model()
+        self._warm_up_model()
 
     def _log_microphones(self):
         logger.info("Available microphones:")
@@ -68,9 +72,41 @@ class SpeechRecognitionManager:
         logger.info("faster-whisper model %s loaded on CPU (int8)", model_name)
         return model
 
+    def _warm_up_model(self):
+        """Pay one-time model initialization cost before the first live phrase."""
+        started = time.perf_counter()
+        try:
+            segments, _ = self.model.transcribe(
+                np.zeros(self._SAMPLE_RATE, dtype=np.float32),
+                language=self.language, beam_size=1, best_of=1, temperature=0,
+                condition_on_previous_text=False, vad_filter=False,
+                without_timestamps=True,
+            )
+            list(segments)
+            logger.info(
+                "faster-whisper warm-up completed in %.0f ms",
+                (time.perf_counter() - started) * 1000,
+            )
+        except Exception:
+            logger.exception("faster-whisper warm-up failed; continuing")
+
     def _notify_cli(self, event):
         if self._cli_callback:
             self._cli_callback(event)
+
+    def _start_recording_event(self):
+        with self._recording_lock:
+            if self._recording_active:
+                return
+            self._recording_active = True
+        self._notify_cli("recording_start")
+
+    def _stop_recording_event(self):
+        with self._recording_lock:
+            if not self._recording_active:
+                return
+            self._recording_active = False
+        self._notify_cli("recording_stop")
 
     @staticmethod
     def _energy(chunk):
@@ -80,14 +116,14 @@ class SpeechRecognitionManager:
     def _queue_phrase(self, chunks):
         samples = np.frombuffer(b"".join(chunks), dtype=np.int16).astype(np.float32)
         if len(samples) < int(self._MIN_PHRASE_SECONDS * self._SAMPLE_RATE):
-            self._notify_cli("recording_stop")
+            self._stop_recording_event()
             return
         samples /= 32768.0
         try:
-            self._audio_queue.put_nowait(samples)
+            self._audio_queue.put_nowait((samples, time.perf_counter()))
         except queue.Full:
             logger.warning("Dropping phrase because transcription is still busy")
-            self._notify_cli("recording_stop")
+            self._stop_recording_event()
 
     def _continuous_listen(self):
         """Capture continuously while the independent worker transcribes."""
@@ -113,12 +149,13 @@ class SpeechRecognitionManager:
                         phrase = list(pre_roll)
                         pre_roll.clear()
                         quiet = 0
-                        self._notify_cli("recording_start")
+                        self._start_recording_event()
                     continue
                 phrase.append(chunk)
                 quiet = 0 if speaking else quiet + 1
                 if quiet >= silence_count or len(phrase) >= max_count:
                     self._queue_phrase(phrase[:-quiet] if quiet else phrase)
+                    self._stop_recording_event()
                     phrase, quiet = [], 0
         except Exception:
             if not self._stop_event.is_set():
@@ -126,14 +163,18 @@ class SpeechRecognitionManager:
         finally:
             if phrase:
                 self._queue_phrase(phrase)
+            self._stop_recording_event()
             logger.info("Continuous speech listening stopped")
 
     def _transcribe(self):
         while True:
-            audio = self._audio_queue.get()
-            if audio is None:
+            queued = self._audio_queue.get()
+            if queued is None:
                 self._audio_queue.task_done()
                 return
+            audio, captured_at = queued
+            started = time.perf_counter()
+            logger.info("Speech transcription queue delay: %.0f ms", (started - captured_at) * 1000)
             try:
                 segments, _ = self.model.transcribe(
                     audio, language=self.language, beam_size=1, best_of=1,
@@ -141,6 +182,7 @@ class SpeechRecognitionManager:
                     vad_filter=False, without_timestamps=True,
                 )
                 text = " ".join(segment.text.strip() for segment in segments).strip()
+                logger.info("Speech transcription completed in %.0f ms", (time.perf_counter() - started) * 1000)
                 if text:
                     logger.info("Recognized speech: %s", text)
                     if self.on_speech_callback:
@@ -148,7 +190,6 @@ class SpeechRecognitionManager:
             except Exception:
                 logger.exception("Local speech recognition error")
             finally:
-                self._notify_cli("recording_stop")
                 self._audio_queue.task_done()
 
     def start_listening(self):
@@ -167,6 +208,7 @@ class SpeechRecognitionManager:
     def stop_listening(self):
         self.is_listening = False
         self._stop_event.set()
+        self._stop_recording_event()
         if self._stream:
             self._stream.stop_stream()
             self._stream.close()
